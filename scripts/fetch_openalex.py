@@ -2,7 +2,8 @@
 """Build the MVP dataset from the public OpenAlex API.
 
 Top venues are fixed per comparison unit using 2015-2019 CWTS Core journal articles.
-Engineering keeps its global field aggregate and gains a separate 16-subfield drill-down.
+Engineering and Computer Science keep their global aggregates and gain separate
+same-level subfield drill-downs.
 Candidates need at least 200 articles and are ranked by a Bayesian-shrunk
 share of papers in OpenAlex's field/year/type-normalized top citation decile.
 """
@@ -26,7 +27,7 @@ START_YEAR = 2000
 AS_OF = date(2026, 8, 26)
 SEASON_YEARS = (2019, 2022, 2023, 2024, 2025)
 ROOT = Path(__file__).resolve().parents[1]
-CACHE = ROOT / ".cache" / "openalex-units"
+CACHE = ROOT / ".cache" / "openalex-units-v12-min200"
 
 ZH_FIELDS = {
     11: "农业与生物科学", 12: "艺术与人文", 13: "生化、遗传与分子生物学",
@@ -45,6 +46,13 @@ ZH_ENGINEERING_SUBFIELDS = {
     2210: "机械工程", 2211: "材料力学", 2212: "海洋工程",
     2213: "安全、风险、可靠性与质量", 2214: "媒体技术",
     2215: "建筑与施工", 2216: "建筑学",
+}
+
+ZH_COMPUTER_SCIENCE_SUBFIELDS = {
+    1702: "人工智能", 1703: "计算理论与数学", 1704: "计算机图形学与计算机辅助设计",
+    1705: "计算机网络与通信", 1706: "计算机科学应用",
+    1707: "计算机视觉与模式识别", 1708: "硬件与体系结构",
+    1709: "人机交互", 1710: "信息系统", 1711: "信号处理", 1712: "软件工程",
 }
 
 ZH_DOMAINS = {
@@ -101,7 +109,7 @@ def select_top_journals(unit):
     names_payload = api("works", filter=base, group_by="primary_location.source.id", per_page=200)
     names = {row["key"].split("/")[-1]: row["key_display_name"] for row in names_payload.get("group_by", [])}
     candidates = []
-    minimum_articles = 50 if unit.get("level") == "subfield" else 200
+    minimum_articles = 200
     for source_id, n in total.items():
         if n < minimum_articles:
             continue
@@ -122,20 +130,20 @@ def fetch_unit(unit, journals):
     unit_id = int(unit["id"].split("/")[-1])
     base = unit_base(unit)
     journal_ids = [j["id"] for j in journals]
-    elite = base + f",primary_location.source.id:{source_filter(journal_ids)}"
+    elite = base + f",primary_location.source.id:{source_filter(journal_ids)}" if journal_ids else None
     through_2025 = ",from_publication_date:2000-01-01,to_publication_date:2025-12-31"
 
     all_counts = groups(base + through_2025, "publication_year")
-    elite_counts = groups(elite + through_2025, "publication_year")
-    elite_top10 = groups(elite + through_2025 + ",citation_normalized_percentile.is_in_top_10_percent:true", "publication_year")
+    elite_counts = groups(elite + through_2025, "publication_year") if elite else {}
+    elite_top10 = groups(elite + through_2025 + ",citation_normalized_percentile.is_in_top_10_percent:true", "publication_year") if elite else {}
 
-    actual_2026 = count(elite + f",from_publication_date:2026-01-01,to_publication_date:{AS_OF.isoformat()}")
+    actual_2026 = count(elite + f",from_publication_date:2026-01-01,to_publication_date:{AS_OF.isoformat()}") if elite else 0
     all_2026 = count(base + f",from_publication_date:2026-01-01,to_publication_date:{AS_OF.isoformat()}")
-    top10_2026 = count(elite + f",from_publication_date:2026-01-01,to_publication_date:{AS_OF.isoformat()},citation_normalized_percentile.is_in_top_10_percent:true")
+    top10_2026 = count(elite + f",from_publication_date:2026-01-01,to_publication_date:{AS_OF.isoformat()},citation_normalized_percentile.is_in_top_10_percent:true") if elite else 0
 
     fractions = []
     for year in SEASON_YEARS:
-        partial = count(elite + f",from_publication_date:{year}-01-01,to_publication_date:{year}-08-26")
+        partial = count(elite + f",from_publication_date:{year}-01-01,to_publication_date:{year}-08-26") if elite else 0
         full = elite_counts.get(str(year), 0)
         if full:
             fractions.append(partial / full)
@@ -162,7 +170,7 @@ def fetch_unit(unit, journals):
         "id": unit_id,
         "level": unit.get("level", "field"),
         "parentField": unit.get("parentField"),
-        "name": (ZH_ENGINEERING_SUBFIELDS if unit.get("level") == "subfield" else ZH_FIELDS).get(unit_id, unit["display_name"]),
+        "name": (ZH_COMPUTER_SCIENCE_SUBFIELDS if unit.get("parentField") == "计算机科学" else ZH_ENGINEERING_SUBFIELDS if unit.get("level") == "subfield" else ZH_FIELDS).get(unit_id, unit["display_name"]),
         "nameEn": unit["display_name"],
         "domain": ZH_DOMAINS.get(unit["domain"]["display_name"], unit["domain"]["display_name"]),
         "seasonFraction": round(season_fraction, 4),
@@ -213,17 +221,17 @@ def enrich(fields):
 
         for idx, (_, metric) in enumerate(rows):
             v = percentile(volumes, volumes[idx])
-            q = percentile(qualities, qualities[idx]) if qualities[idx] is not None else 50
-            m = percentile(momenta, momenta[idx]) if momenta[idx] is not None else 50
+            q = percentile(qualities, qualities[idx]) if qualities[idx] is not None else None
+            m = percentile(momenta, momenta[idx]) if momenta[idx] is not None else None
             metric["volumeScore"] = round(v, 1)
-            metric["qualityScore"] = round(q, 1)
-            metric["momentumScore"] = round(m, 1)
-            metric["prosperityScore"] = round(0.40 * v + 0.35 * q + 0.25 * m, 1)
+            metric["qualityScore"] = round(q, 1) if q is not None else None
+            metric["momentumScore"] = round(m, 1) if m is not None else None
+            metric["prosperityScore"] = round(0.40 * v + 0.35 * q + 0.25 * m, 1) if q is not None and m is not None else None
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--full", action="store_true", help="refresh global fields as well as engineering subfields")
+    parser.add_argument("--full", action="store_true", help="refresh global fields as well as subfield drill-downs")
     args = parser.parse_args()
     CACHE.mkdir(parents=True, exist_ok=True)
     fields_payload = api("fields", per_page=100)
@@ -237,7 +245,14 @@ def main():
         for subfield in subfields_payload["results"]
     ]
     engineering_subfields.sort(key=lambda f: int(f["id"].split("/")[-1]))
-    units = sorted(fields, key=lambda f: int(f["id"].split("/")[-1])) + engineering_subfields if args.full else engineering_subfields
+    computer_science_payload = api("subfields", filter="field.id:17", per_page=100)
+    computer_science_subfields = [
+        {**subfield, "level": "subfield", "parentField": "计算机科学"}
+        for subfield in computer_science_payload["results"]
+    ]
+    computer_science_subfields.sort(key=lambda f: int(f["id"].split("/")[-1]))
+    drilldowns = engineering_subfields + computer_science_subfields
+    units = sorted(fields, key=lambda f: int(f["id"].split("/")[-1])) + drilldowns if args.full else drilldowns
 
     journal_map = {}
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -280,10 +295,12 @@ def main():
             {**field, "level": field.get("level", "field"), "parentField": field.get("parentField")}
             for field in existing["fields"]
         ]
-    engineering_results = [result for result in results if result["level"] == "subfield"]
+    engineering_results = [result for result in results if result.get("parentField") == "工程学"]
+    computer_science_results = [result for result in results if result.get("parentField") == "计算机科学"]
     # Scores and ranks are normalized only against peers at the same hierarchy level.
     enrich(field_results)
     enrich(engineering_results)
+    enrich(computer_science_results)
     payload = {
         "meta": {
             "source": "OpenAlex",
@@ -295,11 +312,13 @@ def main():
             "fieldCount": len(field_results),
             "fieldLevelCount": len(field_results),
             "engineeringSubfieldCount": len(engineering_subfields),
-            "methodVersion": "1.1",
+            "computerScienceSubfieldCount": len(computer_science_subfields),
+            "methodVersion": "1.2",
             "note": "2026为截至8月26日的年内数据；预测值按各领域历史同期发表占比校正。",
         },
         "fields": field_results,
         "engineeringSubfields": engineering_results,
+        "computerScienceSubfields": computer_science_results,
     }
     out = ROOT / "app" / "data" / "openalex.json"
     out.parent.mkdir(parents=True, exist_ok=True)

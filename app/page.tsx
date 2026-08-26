@@ -41,13 +41,20 @@ function valueOf(metric: Metric, key: MetricKey) {
   return typeof value === 'number' ? value : null;
 }
 
-function pathFor(metrics: Metric[], key: MetricKey, min: number, max: number, width=720, height=300) {
-  const points = metrics.map(m => ({x:(m.year-2000)/26*width,y:valueOf(m,key)})).filter(p=>p.y!==null) as {x:number;y:number}[];
+function pathFor(metrics: Metric[], key: MetricKey, min: number, max: number, startYear:number, endYear:number, width=720, height=300) {
+  const points = metrics.map(m => ({x:(m.year-startYear)/(endYear-startYear||1)*width,y:valueOf(m,key)})).filter(p=>p.y!==null) as {x:number;y:number}[];
   return points.map((p,i)=>`${i?'L':'M'}${p.x.toFixed(1)},${(height-(p.y-min)/(max-min||1)*height).toFixed(1)}`).join(' ');
 }
 
 function LineChart({fields,keyName,focusId,onFocus,onToggle}:{fields:Field[];keyName:MetricKey;focusId:number;onFocus:(id:number)=>void;onToggle:(id:number)=>void}) {
-  const values = fields.flatMap(f=>f.metrics.map(m=>valueOf(m,keyName))).filter((v):v is number=>v!==null);
+  const available=fields.flatMap(f=>f.metrics.map(m=>({year:m.year,value:valueOf(m,keyName)}))).filter((row):row is {year:number;value:number}=>row.value!==null);
+  const values=available.map(row=>row.value);
+  const startYear=Math.min(...available.map(row=>row.year)), endYear=Math.max(...available.map(row=>row.year));
+  const yearSpan=endYear-startYear;
+  const yearStep=yearSpan<=6?1:yearSpan<=12?2:5;
+  const yearTicks=[startYear,...Array.from({length:Math.floor(yearSpan/yearStep)+1},(_,i)=>Math.ceil(startYear/yearStep)*yearStep+i*yearStep).filter(year=>year>startYear&&year<endYear),endYear].filter((year,index,all)=>all.indexOf(year)===index);
+  const forecastStartYear=endYear-1;
+  const forecastX=(forecastStartYear-startYear)/(yearSpan||1)*720;
   const rawMin=Math.min(...values), rawMax=Math.max(...values);
   const boundedScore=keyName==='prosperityScore';
   const positiveMetric=keyName==='topPaperCount'||keyName==='top10CitedShare'||keyName==='socialAttentionIndex';
@@ -60,19 +67,19 @@ function LineChart({fields,keyName,focusId,onFocus,onToggle}:{fields:Field[];key
     <div className="axis-y">{ticks.map(t=><span key={t}>{METRICS[keyName].format(t)}</span>)}</div>
     <svg className="line-chart" viewBox="0 0 720 300" role="img" aria-label={`${fields.map(f=>f.name).join('、')}的${METRICS[keyName].label}历史曲线`}>
       {ticks.map((_,i)=><line key={i} x1="0" x2="720" y1={i*75} y2={i*75} className="gridline" />)}
-      <rect x="692.3" width="27.7" height="300" className="partial-zone" />
-      <line x1="692.3" x2="692.3" y1="0" y2="300" className="partial-line" />
+      <rect x={forecastX} width={720-forecastX} height="300" className="partial-zone" />
+      <line x1={forecastX} x2={forecastX} y1="0" y2="300" className="partial-line" />
       {fields.map((field,index)=>{
-        const all=field.metrics; const through2025=all.filter(m=>m.year<=2025); const last=all.filter(m=>m.year>=2025);
+        const all=field.metrics; const through2025=all.filter(m=>m.year<=forecastStartYear); const last=all.filter(m=>m.year>=forecastStartYear); const latest=[...all].reverse().find(m=>valueOf(m,keyName)!==null);
         const color=colorAt(index); const active=field.id===focusId;
         return <g key={field.id} className={active?'series active':'series'} onClick={()=>onFocus(field.id)} onDoubleClick={event=>{event.stopPropagation();onToggle(field.id)}} tabIndex={0} role="button" aria-label={`单击高亮${field.name}，双击隐藏`} onKeyDown={e=>{if(e.key==='Enter')onFocus(field.id)}}>
-          <path d={pathFor(through2025,keyName,min,max)} stroke={color} />
-          <path d={pathFor(last,keyName,min,max)} stroke={color} className="forecast-path" />
-          <circle cx="720" cy={300-((valueOf(all[all.length-1],keyName)??min)-min)/(max-min||1)*300} r={active?5:3.5} fill={color} />
+          <path d={pathFor(through2025,keyName,min,max,startYear,endYear)} stroke={color} />
+          <path d={pathFor(last,keyName,min,max,startYear,endYear)} stroke={color} className="forecast-path" />
+          {latest&&<circle cx={(latest.year-startYear)/(yearSpan||1)*720} cy={300-((valueOf(latest,keyName)??min)-min)/(max-min||1)*300} r={active?5:3.5} fill={color} />}
         </g>;
       })}
     </svg>
-    <div className="axis-x"><span>2000</span><span>2005</span><span>2010</span><span>2015</span><span>2020</span><span>2026*</span></div>
+    <div className="axis-x">{yearTicks.map((tick,index)=><span key={tick} style={{left:`${(tick-startYear)/(yearSpan||1)*100}%`,transform:index===0?'none':index===yearTicks.length-1?'translateX(-100%)':'translateX(-50%)'}}>{tick}{tick===2026?'*':''}</span>)}</div>
   </div>;
 }
 

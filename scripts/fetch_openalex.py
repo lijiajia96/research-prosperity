@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build the MVP dataset from the public OpenAlex API.
 
-Top venues are fixed per field using 2015-2019 CWTS Core journal articles.
+Top venues are fixed per comparison unit using 2015-2019 CWTS Core journal articles.
+Engineering keeps its global field aggregate and gains a separate 16-subfield drill-down.
 Candidates need at least 200 articles and are ranked by a Bayesian-shrunk
 share of papers in OpenAlex's field/year/type-normalized top citation decile.
 """
@@ -10,10 +11,12 @@ from __future__ import annotations
 
 import json
 import math
+import argparse
 import statistics
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
@@ -23,6 +26,7 @@ START_YEAR = 2000
 AS_OF = date(2026, 8, 26)
 SEASON_YEARS = (2019, 2022, 2023, 2024, 2025)
 ROOT = Path(__file__).resolve().parents[1]
+CACHE = ROOT / ".cache" / "openalex-units"
 
 ZH_FIELDS = {
     11: "农业与生物科学", 12: "艺术与人文", 13: "生化、遗传与分子生物学",
@@ -34,6 +38,15 @@ ZH_FIELDS = {
     33: "社会科学", 34: "兽医学", 35: "牙科学", 36: "健康专业",
 }
 
+ZH_ENGINEERING_SUBFIELDS = {
+    2200: "综合工程", 2202: "航空航天工程", 2203: "汽车工程",
+    2204: "生物医学工程", 2205: "土木与结构工程", 2206: "计算力学",
+    2207: "控制与系统工程", 2208: "电气与电子工程", 2209: "工业与制造工程",
+    2210: "机械工程", 2211: "材料力学", 2212: "海洋工程",
+    2213: "安全、风险、可靠性与质量", 2214: "媒体技术",
+    2215: "建筑与施工", 2216: "建筑学",
+}
+
 ZH_DOMAINS = {
     "Life Sciences": "生命科学", "Social Sciences": "社会科学",
     "Physical Sciences": "物理科学", "Health Sciences": "健康科学",
@@ -43,14 +56,21 @@ ZH_DOMAINS = {
 def api(path: str, **params):
     url = f"{API}/{path}?{urllib.parse.urlencode(params)}"
     last_error = None
-    for attempt in range(6):
+    for attempt in range(10):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "research-prosperity-mvp/1.0"})
             with urllib.request.urlopen(req, timeout=45) as response:
                 return json.load(response)
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code == 429:
+                retry_after = int(exc.headers.get("Retry-After", "10"))
+                time.sleep(min(60, max(retry_after, 3 * (attempt + 1))))
+                continue
+            time.sleep(min(12, 0.8 * (2**attempt)))
         except Exception as exc:  # network/API retry boundary
             last_error = exc
-            time.sleep(min(8, 0.6 * (2**attempt)))
+            time.sleep(min(12, 0.8 * (2**attempt)))
     raise RuntimeError(f"OpenAlex request failed: {url}") from last_error
 
 
@@ -67,20 +87,23 @@ def source_filter(ids):
     return "|".join(ids)
 
 
-def field_base(field_id: int):
-    return f"primary_topic.field.id:{field_id},type:article,primary_location.source.is_core:true"
+def unit_base(unit):
+    unit_id = int(unit["id"].split("/")[-1])
+    level = unit.get("level", "field")
+    return f"primary_topic.{level}.id:{unit_id},type:article,primary_location.source.is_core:true"
 
 
-def select_top_journals(field):
-    field_id = int(field["id"].split("/")[-1])
-    base = field_base(field_id) + ",from_publication_date:2015-01-01,to_publication_date:2019-12-31"
+def select_top_journals(unit):
+    unit_id = int(unit["id"].split("/")[-1])
+    base = unit_base(unit) + ",from_publication_date:2015-01-01,to_publication_date:2019-12-31"
     total = groups(base, "primary_location.source.id")
     cited = groups(base + ",citation_normalized_percentile.is_in_top_10_percent:true", "primary_location.source.id")
     names_payload = api("works", filter=base, group_by="primary_location.source.id", per_page=200)
     names = {row["key"].split("/")[-1]: row["key_display_name"] for row in names_payload.get("group_by", [])}
     candidates = []
+    minimum_articles = 50 if unit.get("level") == "subfield" else 200
     for source_id, n in total.items():
-        if n < 200:
+        if n < minimum_articles:
             continue
         top = cited.get(source_id, 0)
         shrunk_share = (top + 10) / (n + 100)  # 10% prior, strength 100
@@ -92,12 +115,12 @@ def select_top_journals(field):
             "selectionScore": round(shrunk_share, 4),
         })
     candidates.sort(key=lambda x: (x["selectionScore"], x["baselineArticles"]), reverse=True)
-    return field_id, candidates[:10]
+    return unit_id, candidates[:10]
 
 
-def fetch_field(field, journals):
-    field_id = int(field["id"].split("/")[-1])
-    base = field_base(field_id)
+def fetch_unit(unit, journals):
+    unit_id = int(unit["id"].split("/")[-1])
+    base = unit_base(unit)
     journal_ids = [j["id"] for j in journals]
     elite = base + f",primary_location.source.id:{source_filter(journal_ids)}"
     through_2025 = ",from_publication_date:2000-01-01,to_publication_date:2025-12-31"
@@ -136,10 +159,12 @@ def fetch_field(field, journals):
             "top10CitedShare": round(cited_n / n, 4) if n else None,
         })
     return {
-        "id": field_id,
-        "name": ZH_FIELDS.get(field_id, field["display_name"]),
-        "nameEn": field["display_name"],
-        "domain": ZH_DOMAINS.get(field["domain"]["display_name"], field["domain"]["display_name"]),
+        "id": unit_id,
+        "level": unit.get("level", "field"),
+        "parentField": unit.get("parentField"),
+        "name": (ZH_ENGINEERING_SUBFIELDS if unit.get("level") == "subfield" else ZH_FIELDS).get(unit_id, unit["display_name"]),
+        "nameEn": unit["display_name"],
+        "domain": ZH_DOMAINS.get(unit["domain"]["display_name"], unit["domain"]["display_name"]),
         "seasonFraction": round(season_fraction, 4),
         "topJournals": journals,
         "metrics": metrics,
@@ -197,30 +222,68 @@ def enrich(fields):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--full", action="store_true", help="refresh global fields as well as engineering subfields")
+    args = parser.parse_args()
+    CACHE.mkdir(parents=True, exist_ok=True)
     fields_payload = api("fields", per_page=100)
-    fields = sorted(fields_payload["results"], key=lambda f: int(f["id"].split("/")[-1]))
+    fields = [
+        {**field, "level": "field", "parentField": None}
+        for field in fields_payload["results"]
+    ]
+    subfields_payload = api("subfields", filter="field.id:22", per_page=100)
+    engineering_subfields = [
+        {**subfield, "level": "subfield", "parentField": "工程学"}
+        for subfield in subfields_payload["results"]
+    ]
+    engineering_subfields.sort(key=lambda f: int(f["id"].split("/")[-1]))
+    units = sorted(fields, key=lambda f: int(f["id"].split("/")[-1])) + engineering_subfields if args.full else engineering_subfields
 
     journal_map = {}
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = [pool.submit(select_top_journals, field) for field in fields]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = []
+        for unit in units:
+            unit_id = int(unit["id"].split("/")[-1])
+            cache_path = CACHE / f"journals-{unit_id}.json"
+            if cache_path.exists():
+                journal_map[unit_id] = json.loads(cache_path.read_text(encoding="utf-8"))
+            else:
+                futures.append(pool.submit(select_top_journals, unit))
         for future in as_completed(futures):
-            field_id, journals = future.result()
-            journal_map[field_id] = journals
-            print(f"selected journals for field {field_id}", flush=True)
+            unit_id, journals = future.result()
+            journal_map[unit_id] = journals
+            (CACHE / f"journals-{unit_id}.json").write_text(json.dumps(journals, ensure_ascii=False), encoding="utf-8")
+            print(f"selected journals for unit {unit_id}", flush=True)
 
     results = []
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {
-            pool.submit(fetch_field, field, journal_map[int(field["id"].split("/")[-1])]): field
-            for field in fields
-        }
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {}
+        for unit in units:
+            unit_id = int(unit["id"].split("/")[-1])
+            cache_path = CACHE / f"history-{unit_id}.json"
+            if cache_path.exists():
+                results.append(json.loads(cache_path.read_text(encoding="utf-8")))
+            else:
+                futures[pool.submit(fetch_unit, unit, journal_map[unit_id])] = unit
         for future in as_completed(futures):
             result = future.result()
             results.append(result)
+            (CACHE / f"history-{result['id']}.json").write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
             print(f"fetched history for {result['name']}", flush=True)
 
     results.sort(key=lambda f: f["id"])
-    enrich(results)
+    existing_path = ROOT / "app" / "data" / "openalex.json"
+    existing = json.loads(existing_path.read_text(encoding="utf-8")) if existing_path.exists() else None
+    field_results = [result for result in results if result["level"] == "field"]
+    if not args.full and existing:
+        field_results = [
+            {**field, "level": field.get("level", "field"), "parentField": field.get("parentField")}
+            for field in existing["fields"]
+        ]
+    engineering_results = [result for result in results if result["level"] == "subfield"]
+    # Scores and ranks are normalized only against peers at the same hierarchy level.
+    enrich(field_results)
+    enrich(engineering_results)
     payload = {
         "meta": {
             "source": "OpenAlex",
@@ -229,11 +292,14 @@ def main():
             "startYear": START_YEAR,
             "latestMatureYear": 2023,
             "latestCompleteVolumeYear": 2025,
-            "fieldCount": len(results),
-            "methodVersion": "1.0",
+            "fieldCount": len(field_results),
+            "fieldLevelCount": len(field_results),
+            "engineeringSubfieldCount": len(engineering_subfields),
+            "methodVersion": "1.1",
             "note": "2026为截至8月26日的年内数据；预测值按各领域历史同期发表占比校正。",
         },
-        "fields": results,
+        "fields": field_results,
+        "engineeringSubfields": engineering_results,
     }
     out = ROOT / "app" / "data" / "openalex.json"
     out.parent.mkdir(parents=True, exist_ok=True)

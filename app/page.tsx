@@ -12,8 +12,8 @@ type Metric = {
   momentumScore: number; prosperityScore: number;
 };
 type Journal = { id: string; name: string; baselineArticles: number; top10Share: number; selectionScore: number };
-type Field = { id: number; name: string; nameEn: string; domain: string; seasonFraction: number; topJournals: Journal[]; metrics: Metric[] };
-type Dataset = { meta: { source: string; sourceUrl: string; asOf: string; startYear: number; latestMatureYear: number; latestCompleteVolumeYear: number; fieldCount: number; methodVersion: string; note: string }; fields: Field[] };
+type Field = { id: number; level: 'field' | 'subfield'; parentField: string | null; name: string; nameEn: string; domain: string; seasonFraction: number; topJournals: Journal[]; metrics: Metric[] };
+type Dataset = { meta: { source: string; sourceUrl: string; asOf: string; startYear: number; latestMatureYear: number; latestCompleteVolumeYear: number; fieldCount: number; engineeringSubfieldCount: number; methodVersion: string; note: string }; fields: Field[]; engineeringSubfields: Field[] };
 const data = rawData as Dataset;
 
 const COLORS = ['#ff6b35','#167d8d','#7357d9','#c14953','#4f7d39','#d08b22','#3466a3','#9d5b8d'];
@@ -62,8 +62,8 @@ function LineChart({fields,keyName,focusId,onFocus}:{fields:Field[];keyName:Metr
   </div>;
 }
 
-function Quadrant({year,focusId,onFocus}:{year:number;focusId:number;onFocus:(id:number)=>void}) {
-  const rows=data.fields.map(f=>({field:f,metric:f.metrics.find(m=>m.year===year)!})).filter(r=>r.metric.cagr5!==null&&r.metric.qualityChange5!==null);
+function Quadrant({year,focusId,onFocus,units}:{year:number;focusId:number;onFocus:(id:number)=>void;units:Field[]}) {
+  const rows=units.map(f=>({field:f,metric:f.metrics.find(m=>m.year===year)!})).filter(r=>r.metric.cagr5!==null&&r.metric.qualityChange5!==null);
   const xs=rows.map(r=>r.metric.cagr5!), ys=rows.map(r=>r.metric.qualityChange5!);
   const xAbs=Math.max(.05,...xs.map(Math.abs))*1.15, yAbs=Math.max(.02,...ys.map(Math.abs))*1.15;
   const x=(v:number)=>50+v/xAbs*46, y=(v:number)=>50-v/yAbs*44;
@@ -86,15 +86,16 @@ function Quadrant({year,focusId,onFocus}:{year:number;focusId:number;onFocus:(id
 }
 
 function downloadCsv() {
-  const header='field_id,field_name,domain,year,status,top_paper_count,forecast_count,top10_cited_share,cagr_5y,prosperity_score';
-  const rows=data.fields.flatMap(f=>f.metrics.map(m=>[f.id,`"${f.name}"`,`"${f.domain}"`,m.year,m.status,m.topPaperCount,m.forecastCount,m.top10CitedShare??'',m.cagr5??'',m.prosperityScore].join(',')));
+  const header='unit_id,unit_name,level,parent_field,domain,year,status,top_paper_count,forecast_count,top10_cited_share,cagr_5y,prosperity_score';
+  const rows=[...data.fields,...data.engineeringSubfields].flatMap(f=>f.metrics.map(m=>[f.id,`"${f.name}"`,f.level,`"${f.parentField||''}"`,`"${f.domain}"`,m.year,m.status,m.topPaperCount,m.forecastCount,m.top10CitedShare??'',m.cagr5??'',m.prosperityScore].join(',')));
   const blob=new Blob(['\ufeff'+[header,...rows].join('\n')],{type:'text/csv;charset=utf-8'}); const url=URL.createObjectURL(blob);
   const a=document.createElement('a');a.href=url;a.download=`research-prosperity-${data.meta.asOf}.csv`;a.click();URL.revokeObjectURL(url);
 }
 
 export default function Home() {
-  const ranking2025=useMemo(()=>[...data.fields].sort((a,b)=>b.metrics[25].prosperityScore-a.metrics[25].prosperityScore),[]);
-  const initialIds=ranking2025.slice(0,6).map(f=>f.id);
+  const globalRanking=useMemo(()=>[...data.fields].sort((a,b)=>b.metrics[25].prosperityScore-a.metrics[25].prosperityScore),[]);
+  const [scope,setScope]=useState<'global'|'engineering'>('global');
+  const initialIds=globalRanking.slice(0,6).map(f=>f.id);
   const [metric,setMetric]=useState<MetricKey>('prosperityScore');
   const [selected,setSelected]=useState<number[]>(initialIds);
   const [focusId,setFocusId]=useState(initialIds[0]);
@@ -102,16 +103,24 @@ export default function Home() {
   const [methodOpen,setMethodOpen]=useState(false);
   useEffect(()=>{
     const params=new URLSearchParams(location.search); const m=params.get('metric') as MetricKey|null; const f=Number(params.get('field')); const y=Number(params.get('year'));
-    if(m&&METRICS[m])setMetric(m); if(f&&data.fields.some(x=>x.id===f))setFocusId(f); if(y>=2005&&y<=2026)setYear(y);
+    const isEngineering=data.engineeringSubfields.some(x=>x.id===f)||params.get('scope')==='engineering';
+    const targetUnits=isEngineering?data.engineeringSubfields:data.fields;
+    const targetRanking=[...targetUnits].sort((a,b)=>b.metrics[25].prosperityScore-a.metrics[25].prosperityScore);
+    if(m&&METRICS[m])setMetric(m); if(isEngineering)setScope('engineering');
+    if(f&&targetUnits.some(x=>x.id===f))setFocusId(f); else setFocusId(targetRanking[0].id);
+    setSelected(targetRanking.slice(0,6).map(x=>x.id)); if(y>=2005&&y<=2026)setYear(y);
   },[]);
   useEffect(()=>{
-    const params=new URLSearchParams({metric,field:String(focusId),year:String(year)}); history.replaceState(null,'',`?${params}#trend`);
-  },[metric,focusId,year]);
-  const shown=data.fields.filter(f=>selected.includes(f.id));
-  const focus=data.fields.find(f=>f.id===focusId)!;
+    const params=new URLSearchParams({metric,field:String(focusId),year:String(year),scope}); history.replaceState(null,'',`?${params}#trend`);
+  },[metric,focusId,year,scope]);
+  const units=scope==='global'?data.fields:data.engineeringSubfields;
+  const ranking2025=useMemo(()=>[...units].sort((a,b)=>b.metrics[25].prosperityScore-a.metrics[25].prosperityScore),[units]);
+  const shown=units.filter(f=>selected.includes(f.id));
+  const focus=units.find(f=>f.id===focusId)??ranking2025[0];
   const m2025=focus.metrics.find(m=>m.year===2025)!; const m2026=focus.metrics.find(m=>m.year===2026)!;
   const rank=ranking2025.findIndex(f=>f.id===focus.id)+1;
   const toggle=(id:number)=>setSelected(current=>current.includes(id)?(current.length>1?current.filter(x=>x!==id):current):current.length<8?[...current,id]:current);
+  const changeScope=(next:'global'|'engineering')=>{const nextUnits=next==='global'?data.fields:data.engineeringSubfields;const nextRanking=[...nextUnits].sort((a,b)=>b.metrics[25].prosperityScore-a.metrics[25].prosperityScore);setScope(next);setSelected(nextRanking.slice(0,6).map(f=>f.id));setFocusId(next==='engineering'?(nextUnits.find(f=>f.id===2208)?.id??nextRanking[0].id):22)};
 
   return <main>
     <header className="topbar">
@@ -120,7 +129,7 @@ export default function Home() {
     </header>
 
     <section className="hero" id="top">
-      <div><p className="eyebrow">GLOBAL RESEARCH PULSE · 2000—2026</p><h1>哪些科学领域，<br/><em>正在真正兴盛？</em></h1><p className="lede">从固定高影响期刊池出发，同时观察论文规模、归一化引用质量与五年增长动量。最新年份保留，但不伪装成成熟数据。</p></div>
+      <div><p className="eyebrow">GLOBAL RESEARCH PULSE · 2000—2026</p><h1>哪些科学领域，<br/><em>正在真正兴盛？</em></h1><p className="lede">从固定高影响期刊池出发，同时观察论文规模、归一化引用质量与五年增长动量。工程学可进一步下钻到 16 个具体方向。</p></div>
       <div className="freshness"><span className="pulse"/><div><b>更新至 {data.meta.asOf.replaceAll('-','.')}</b><small>2026 年内数据 · 全年预测已校正季节性</small></div></div>
     </section>
 
@@ -131,10 +140,10 @@ export default function Home() {
     </section>
 
     <section className="panel trend-panel" id="trend">
-      <div className="panel-head"><div><p className="kicker">01 / 长期趋势</p><h2>{METRICS[metric].label}</h2><p>点击曲线或右侧领域查看详情；2026 虚线为预测值</p></div><div className="segmented">{(Object.keys(METRICS) as MetricKey[]).map(k=><button key={k} className={metric===k?'active':''} onClick={()=>setMetric(k)}>{METRICS[k].short}</button>)}</div></div>
+      <div className="panel-head"><div><p className="kicker">01 / 长期趋势</p><h2>{scope==='global'?'全球科研领域':'工程学 · 16 个子方向'}</h2><p>{METRICS[metric].label} · 点击曲线或右侧条目查看详情；2026 虚线为预测值</p></div><div className="control-stack"><div className="scope-toggle" aria-label="比较层级"><button className={scope==='global'?'active':''} onClick={()=>changeScope('global')}>全球领域</button><button className={scope==='engineering'?'active':''} onClick={()=>changeScope('engineering')}>拆解工程学</button></div><div className="segmented">{(Object.keys(METRICS) as MetricKey[]).map(k=><button key={k} className={metric===k?'active':''} onClick={()=>setMetric(k)}>{METRICS[k].short}</button>)}</div></div></div>
       <div className="trend-grid">
         <LineChart fields={shown} keyName={metric} focusId={focusId} onFocus={setFocusId}/>
-        <aside className="field-picker"><div className="picker-title"><b>2025 排名</b><span>选择至多 8 个领域</span></div>{ranking2025.map((field,index)=>{
+        <aside className="field-picker"><div className="picker-title"><b>2025 {scope==='global'?'领域':'工程方向'}排名</b><span>选择至多 8 个</span></div>{ranking2025.map((field,index)=>{
           const active=selected.includes(field.id); return <button key={field.id} className={`${active?'selected ':''}${focusId===field.id?'focused':''}`} onClick={()=>{setFocusId(field.id);if(!active)toggle(field.id)}}><i style={{background:active?COLORS[shown.findIndex(f=>f.id===field.id)%COLORS.length]:'#d6d3ca'}}/><span>{index+1}</span><b>{field.name}</b><em>{field.metrics[25].prosperityScore.toFixed(1)}</em></button>;
         })}</aside>
       </div>
@@ -142,9 +151,9 @@ export default function Home() {
     </section>
 
     <section className="split" id="momentum">
-      <article className="panel quadrant-panel"><div className="panel-head"><div><p className="kicker">02 / 兴盛象限</p><h2>数量与质量，是否同步上升？</h2><p>气泡大小代表顶刊论文量；右上区域为双增长</p></div><output>{year}</output></div><Quadrant year={year} focusId={focusId} onFocus={setFocusId}/><div className="year-control"><span>2005</span><input aria-label="选择年份" type="range" min="2005" max="2026" value={year} onChange={e=>setYear(Number(e.target.value))}/><span>2026</span></div></article>
+      <article className="panel quadrant-panel"><div className="panel-head"><div><p className="kicker">02 / 兴盛象限</p><h2>数量与质量，是否同步上升？</h2><p>{scope==='global'?'26 个一级领域':'16 个工程子方向'}相互比较；右上区域为双增长</p></div><output>{year}</output></div><Quadrant year={year} focusId={focusId} onFocus={setFocusId} units={units}/><div className="year-control"><span>2005</span><input aria-label="选择年份" type="range" min="2005" max="2026" value={year} onChange={e=>setYear(Number(e.target.value))}/><span>2026</span></div></article>
 
-      <article className="panel detail-panel"><div className="detail-title"><div><p className="kicker">领域详情 · 2025</p><h2>{focus.name}</h2><p>{focus.nameEn} · {focus.domain}</p></div><div className="rank"><span>综合排名</span><b>#{rank}</b><small>/ {data.meta.fieldCount}</small></div></div>
+      <article className="panel detail-panel"><div className="detail-title"><div><p className="kicker">{scope==='global'?'领域详情':'工程学 / 子方向'} · 2025</p><h2>{focus.name}</h2><p>{focus.nameEn} · {focus.domain}</p></div><div className="rank"><span>{scope==='global'?'全球领域':'工程方向'}排名</span><b>#{rank}</b><small>/ {ranking2025.length}</small></div></div>
         <div className="metric-cards"><div><span>顶刊论文</span><b>{m2025.topPaperCount.toLocaleString('zh-CN')}</b><small>2025 完整年度</small></div><div><span>高被引占比</span><b>{((m2025.top10CitedShare||0)*100).toFixed(1)}%</b><small>同年同类同子领域前 10%</small></div><div><span>五年增长</span><b className={(m2025.cagr5||0)>=0?'up':'down'}>{(m2025.cagr5||0)>=0?'+':''}{((m2025.cagr5||0)*100).toFixed(1)}%</b><small>年复合增长率</small></div></div>
         <div className="nowcast"><div><span>2026 已收录</span><b>{m2026.topPaperCount.toLocaleString('zh-CN')}</b></div><div><span>2026 全年预测</span><b>≈ {m2026.forecastCount.toLocaleString('zh-CN')}</b></div><p>该领域历史上截至 8 月 26 日通常完成全年发表量的 {(focus.seasonFraction*100).toFixed(1)}%。预测仅用于观察方向。</p></div>
         <div className="journal-list"><div><b>固定高影响期刊池</b><span>基准期 2015—2019</span></div><ol>{focus.topJournals.slice(0,6).map(j=><li key={j.id}><span>{j.name}</span><em>{(j.top10Share*100).toFixed(0)}%</em></li>)}</ol><small>右侧为基准期高被引论文占比；完整 10 本名单包含在数据文件中。</small></div>
@@ -155,10 +164,10 @@ export default function Home() {
       <div><span>01</span><b>规模 40%</b><p>固定期刊池论文数量，经对数压缩后做年度领域百分位。</p></div><div><span>02</span><b>质量 35%</b><p>OpenAlex 同类型、同年份、同子领域归一化引用前 10% 占比。</p></div><div><span>03</span><b>动量 25%</b><p>五年论文复合增长率，加上同期质量变化。</p></div>
     </section>
 
-    <section className="data-bar"><div><p className="kicker">开放数据与复现</p><h2>每个分数，都能回到原始年度指标。</h2><p>当前版本覆盖 {data.meta.fieldCount} 个 OpenAlex Field、{data.meta.startYear}—2026 年。顶刊池固定，避免每年换榜制造假增长。</p></div><div><button className="primary" onClick={downloadCsv}>下载年度 CSV</button><a href="/data/openalex.json" download>下载完整 JSON</a><button onClick={()=>setMethodOpen(true)}>查看方法说明</button></div></section>
+    <section className="data-bar"><div><p className="kicker">开放数据与复现</p><h2>每个分数，都能回到原始年度指标。</h2><p>当前版本覆盖 {data.meta.fieldCount} 个 OpenAlex 一级领域，并将工程学拆为 {data.meta.engineeringSubfieldCount} 个可独立比较的子方向。顶刊池固定，避免每年换榜制造假增长。</p></div><div><button className="primary" onClick={downloadCsv}>下载年度 CSV</button><a href="/data/openalex.json" download>下载完整 JSON</a><button onClick={()=>setMethodOpen(true)}>查看方法说明</button></div></section>
 
     <footer><span>科研兴盛度观测站 · MVP 1.0</span><span>数据：<a href={data.meta.sourceUrl} target="_blank">OpenAlex CC0 ↗</a>　更新：{data.meta.asOf}</span></footer>
 
-    {methodOpen&&<div className="modal-backdrop" onMouseDown={()=>setMethodOpen(false)}><section className="method-modal" role="dialog" aria-modal="true" aria-labelledby="method-title" onMouseDown={e=>e.stopPropagation()}><button className="modal-close" onClick={()=>setMethodOpen(false)} aria-label="关闭">×</button><p className="kicker">METHODOLOGY / V1.0</p><h2 id="method-title">方法与边界</h2><h3>顶刊如何确定？</h3><p>在每个 Field 内，从 CWTS Core 期刊中筛选 2015—2019 年至少发表 200 篇论文的来源，再按高被引论文占比排序。排序使用 10% 先验、强度 100 的贝叶斯收缩，降低小样本异常。每个领域固定前 10 本，历史上不换榜。</p><h3>质量如何计算？</h3><p>采用 OpenAlex 的 <code>citation_normalized_percentile</code>：按论文类型、发表年份和子领域归一化。页面展示进入前 10% 的论文比例。2024 年之后引用尚未成熟，因此标为暂定。</p><h3>2026 为什么可以展示？</h3><p>实际值截止 {data.meta.asOf}。全年预测使用该领域 2019、2022—2025 年同期发表量占全年比例的中位数进行校正；2020—2021 被排除，以减少疫情期节律异常。</p><h3>哪些结论不能直接下？</h3><p>本工具衡量的是高影响期刊论文生态，不等于全部科研活动。计算机领域的重要会议、人文领域的专著、产业研发和未发表成果可能被低估。综合指数适合发现方向，正式判断应回看数量、质量和期刊池。</p><button className="primary full" onClick={()=>setMethodOpen(false)}>我明白了</button></section></div>}
+    {methodOpen&&<div className="modal-backdrop" onMouseDown={()=>setMethodOpen(false)}><section className="method-modal" role="dialog" aria-modal="true" aria-labelledby="method-title" onMouseDown={e=>e.stopPropagation()}><button className="modal-close" onClick={()=>setMethodOpen(false)} aria-label="关闭">×</button><p className="kicker">METHODOLOGY / V1.1</p><h2 id="method-title">方法与边界</h2><h3>工程学如何拆分？</h3><p>全球视图仍保留完整的 26 个一级领域，保证同层级比较。进入“拆解工程学”后，改用 OpenAlex Field 22 下的 16 个 Subfield；子方向的综合分只在这 16 个同层级单位之间标准化，不与完整一级领域混排。</p><h3>顶刊如何确定？</h3><p>在每个比较单元内，从 CWTS Core 期刊中筛选 2015—2019 年至少发表 200 篇论文的来源，再按高被引论文占比排序。排序使用 10% 先验、强度 100 的贝叶斯收缩，降低小样本异常。每个单元固定前 10 本，历史上不换榜。</p><h3>质量如何计算？</h3><p>采用 OpenAlex 的 <code>citation_normalized_percentile</code>：按论文类型、发表年份和子领域归一化。页面展示进入前 10% 的论文比例。2024 年之后引用尚未成熟，因此标为暂定。</p><h3>2026 为什么可以展示？</h3><p>实际值截止 {data.meta.asOf}。全年预测使用该方向 2019、2022—2025 年同期发表量占全年比例的中位数进行校正；2020—2021 被排除，以减少疫情期节律异常。</p><h3>哪些结论不能直接下？</h3><p>本工具衡量的是高影响期刊论文生态，不等于全部科研活动。计算机领域的重要会议、人文领域的专著、产业研发和未发表成果可能被低估。综合指数适合发现方向，正式判断应回看数量、质量和期刊池。</p><button className="primary full" onClick={()=>setMethodOpen(false)}>我明白了</button></section></div>}
   </main>;
 }

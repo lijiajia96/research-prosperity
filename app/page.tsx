@@ -39,7 +39,7 @@ function pathFor(metrics: Metric[], key: MetricKey, min: number, max: number, wi
   return points.map((p,i)=>`${i?'L':'M'}${p.x.toFixed(1)},${(height-(p.y-min)/(max-min||1)*height).toFixed(1)}`).join(' ');
 }
 
-function LineChart({fields,keyName,focusId,onFocus}:{fields:Field[];keyName:MetricKey;focusId:number;onFocus:(id:number)=>void}) {
+function LineChart({fields,keyName,focusId,onFocus,onToggle}:{fields:Field[];keyName:MetricKey;focusId:number;onFocus:(id:number)=>void;onToggle:(id:number)=>void}) {
   const values = fields.flatMap(f=>f.metrics.map(m=>valueOf(m,keyName))).filter((v):v is number=>v!==null);
   const rawMin=Math.min(...values), rawMax=Math.max(...values);
   const min = keyName==='prosperityScore'||keyName==='topPaperCount'||keyName==='top10CitedShare' ? 0 : Math.min(0,rawMin*1.15);
@@ -54,7 +54,7 @@ function LineChart({fields,keyName,focusId,onFocus}:{fields:Field[];keyName:Metr
       {fields.map((field,index)=>{
         const all=field.metrics; const through2025=all.filter(m=>m.year<=2025); const last=all.filter(m=>m.year>=2025);
         const color=colorAt(index); const active=field.id===focusId;
-        return <g key={field.id} className={active?'series active':'series'} onClick={()=>onFocus(field.id)} tabIndex={0} role="button" aria-label={`查看${field.name}`} onKeyDown={e=>{if(e.key==='Enter')onFocus(field.id)}}>
+        return <g key={field.id} className={active?'series active':'series'} onClick={()=>onFocus(field.id)} onDoubleClick={event=>{event.stopPropagation();onToggle(field.id)}} tabIndex={0} role="button" aria-label={`单击高亮${field.name}，双击隐藏`} onKeyDown={e=>{if(e.key==='Enter')onFocus(field.id)}}>
           <path d={pathFor(through2025,keyName,min,max)} stroke={color} />
           <path d={pathFor(last,keyName,min,max)} stroke={color} className="forecast-path" />
           <circle cx="720" cy={300-((valueOf(all[all.length-1],keyName)??min)-min)/(max-min||1)*300} r={active?5:3.5} fill={color} />
@@ -147,9 +147,9 @@ export default function Home() {
     </section>
 
     <section className="panel trend-panel" id="trend">
-      <div className="panel-head"><div><p className="kicker">01 / 长期趋势</p><h2>{scopeTitle}</h2><p>{METRICS[metric].label} · 默认显示全部曲线；点击右侧条目可隐藏或恢复</p></div><div className="control-stack"><div className="scope-toggle" aria-label="比较层级"><button className={scope==='global'?'active':''} onClick={()=>changeScope('global')}>全球领域</button><button className={scope==='engineering'?'active':''} onClick={()=>changeScope('engineering')}>拆解工程学</button><button className={scope==='computer'?'active':''} onClick={()=>changeScope('computer')}>拆解计算机</button></div><div className="segmented">{(Object.keys(METRICS) as MetricKey[]).map(k=><button key={k} className={metric===k?'active':''} onClick={()=>setMetric(k)}>{METRICS[k].short}</button>)}</div></div></div>
+      <div className="panel-head"><div><p className="kicker">01 / 长期趋势</p><h2>{scopeTitle}</h2><p>{METRICS[metric].label} · 单击曲线高亮，双击隐藏；右侧条目可恢复</p></div><div className="control-stack"><div className="scope-toggle" aria-label="比较层级"><button className={scope==='global'?'active':''} onClick={()=>changeScope('global')}>全球领域</button><button className={scope==='engineering'?'active':''} onClick={()=>changeScope('engineering')}>拆解工程学</button><button className={scope==='computer'?'active':''} onClick={()=>changeScope('computer')}>拆解计算机</button></div><div className="segmented">{(Object.keys(METRICS) as MetricKey[]).map(k=><button key={k} className={metric===k?'active':''} onClick={()=>setMetric(k)}>{METRICS[k].short}</button>)}</div></div></div>
       <div className="trend-grid">
-        <LineChart fields={shown} keyName={metric} focusId={focusId} onFocus={setFocusId}/>
+        <LineChart fields={shown} keyName={metric} focusId={focusId} onFocus={setFocusId} onToggle={toggle}/>
         <aside className="field-picker"><div className="picker-title"><b>2025 {scopeRankLabel}排名</b><span>{selected.length}/{units.length} 条曲线</span></div>{ranking2025.map((field,index)=>{
           const active=selected.includes(field.id); return <button key={field.id} className={`${active?'selected ':''}${focusId===field.id?'focused':''}`} onClick={()=>{setFocusId(field.id);toggle(field.id)}}><i style={{background:active?colorAt(shown.findIndex(f=>f.id===field.id)):'#d6d3ca'}}/><span>{index+1}</span><b>{field.name}</b><em>{displayScore(field.metrics[25].prosperityScore)}</em></button>;
         })}</aside>

@@ -2,7 +2,7 @@
 
 用年度曲线同时观察全球科研产出、顶刊质量、增长动量与社会关注度，并把绝对扩张、相对竞争力、预测不确定性和科研结构拆开分析。
 
-在线访问：[research-prosperity-pulse.gaocherrr.chatgpt.site](https://research-prosperity-pulse.gaocherrr.chatgpt.site/)
+在线访问：[lijiajia96.github.io/research-prosperity](https://lijiajia96.github.io/research-prosperity/)
 
 ## 运行时截图
 
